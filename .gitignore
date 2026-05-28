@@ -1,3 +1,39 @@
 build
 mx.scratch
 !.settings
+
+# Build output
+build/
+Debug/
+Release/
+
+# IDE files (CubeIDE)
+.settings/
+.cproject
+.project
+*.launch
+
+# IAR
+*.eww
+*.ewd
+*.ewp
+*.dep
+/settings/
+
+# Keil uVision
+*.uvoptx
+*.uvguix
+*.scvd
+*.dbgconf
+
+# Временные файлы
+*.bak
+*.orig
+*.log
+*.o
+*.d
+*.elf
+*.hex
+*.bin
+*.map
+*.lst
