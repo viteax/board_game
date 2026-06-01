@@ -22,9 +22,8 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "max7219.h"
-#include "stm32f4xx_hal.h"
-#include "stm32f4xx_hal_gpio.h"
-#include <sys/types.h>
+#include "mpu6050.h"
+#include <math.h>
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -37,8 +36,15 @@ typedef struct {
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-#define n 8
-#define m 32
+#define CANVAS_ROWS     8
+#define CANVAS_COLS     32
+#define PLAYER_MIN_X    1
+#define PLAYER_MAX_X    (CANVAS_COLS - 2)
+#define PLAYER_MIN_Y    1
+#define PLAYER_MAX_Y    (CANVAS_ROWS - 2)
+#define IMU_DEADZONE    0.08f
+#define IMU_SCALE       (1.0f / IMU_DEADZONE)
+#define ACCEL_Z_OFFSET  0.25f
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -47,28 +53,64 @@ typedef struct {
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
+I2C_HandleTypeDef hi2c1;
+
 SPI_HandleTypeDef hspi1;
 
 /* USER CODE BEGIN PV */
-extern SPI_HandleTypeDef hspi1;   // объявлен CubeMX
+MPU6050_Data   imu;
+MPU6050_Status imu_status;
+
 MAX7219_Handle_t display = {
-  .hspi    = &hspi1,
-  .cs_port = GPIOA,
-  .cs_pin  = GPIO_PIN_4,
-  .count = 4,
+    .hspi    = &hspi1,
+    .cs_port = GPIOA,
+    .cs_pin  = GPIO_PIN_4,
+    .count   = 4,
 };
+
+static uint8_t canvas[CANVAS_ROWS][CANVAS_COLS];
+static Player  player;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_SPI1_Init(void);
+static void MX_I2C1_Init(void);
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+
+/* Переинициализация I2C + IMU после ошибки шины */
+static void IMU_Reinit(void)
+{
+    HAL_I2C_DeInit(&hi2c1);
+    HAL_I2C_Init(&hi2c1);
+    imu_status = MPU6050_Init(&hi2c1);
+}
+
+/* Переместить игрока, сохраняя его в пределах поля */
+static void Player_Move(int8_t dx, int8_t dy)
+{
+    int8_t nx = (int8_t)player.x + dx;
+    int8_t ny = (int8_t)player.y + dy;
+
+    if (nx < PLAYER_MIN_X) nx = PLAYER_MIN_X;
+    if (nx > PLAYER_MAX_X) nx = PLAYER_MAX_X;
+    if (ny < PLAYER_MIN_Y) ny = PLAYER_MIN_Y;
+    if (ny > PLAYER_MAX_Y) ny = PLAYER_MAX_Y;
+
+    if (nx == player.x && ny == player.y)
+        return;
+
+    canvas[player.y][player.x] = 0;
+    player.x = (uint8_t)nx;
+    player.y = (uint8_t)ny;
+    canvas[player.y][player.x] = 1;
+}
 
 /* USER CODE END 0 */
 
@@ -102,79 +144,64 @@ int main(void)
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
   MX_SPI1_Init();
+  MX_I2C1_Init();
   /* USER CODE BEGIN 2 */
   MAX7219_Init(&display);
   MAX7219_SetBrightness(&display, 0);
-  MAX7219_SetDigit(&display, 0, 3, 0b01000000);
 
-  uint8_t canvas[n][m] = {0};
-
-  // Нарисовать вертикальные борты
-  for (uint8_t y = 0; y < n; y++) {
-    canvas[y][0] = 1;
-    canvas[y][m - 1] = 1;
+  /* Нарисовать борты */
+  for (uint8_t y = 0; y < CANVAS_ROWS; y++) {
+      canvas[y][0]             = 1;
+      canvas[y][CANVAS_COLS-1] = 1;
+  }
+  for (uint8_t x = 0; x < CANVAS_COLS; x++) {
+      canvas[0][x]             = 1;
+      canvas[CANVAS_ROWS-1][x] = 1;
   }
 
-  // Нарисовать горизонтальные борты
-  for (uint8_t x = 0; x < m; x++) {
-    canvas[0][x] = 1;
-    canvas[n - 1][x] = 1;
-  }
-
-  Player player = {
-    .x = m / 2,
-    .y = n / 2,
-  };
+  /* Начальная позиция игрока */
+  player.x = CANVAS_COLS / 2;
+  player.y = CANVAS_ROWS / 2;
   canvas[player.y][player.x] = 1;
 
   MAX7219_DrawMatrix(&display, canvas);
-  uint8_t prev_up = 1;
-  uint8_t prev_down = 1;
-  uint8_t prev_left = 1;
-  uint8_t prev_right = 1;
 
-  uint8_t up_state = 1;
-  uint8_t down_state = 1;
-  uint8_t left_state = 1;
-  uint8_t right_state = 1;
+  imu_status = MPU6050_Init(&hi2c1);
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
   while (1)
   {
-    up_state = HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_13);
-    down_state = HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_14);
-    left_state = HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_12);
-    right_state = HAL_GPIO_ReadPin(GPIOB, GPIO_PIN_15);
-    if (prev_up && !up_state) {
-      canvas[player.y--][player.x] = 0;
-      canvas[player.y][player.x] = 1;
-      MAX7219_DrawMatrix(&display, canvas);
+    if (imu_status == MPU6050_OK)
+    {
+      imu_status = MPU6050_ReadAll(&hi2c1, &imu);
     }
-    if (prev_down && !down_state) {
-      canvas[player.y++][player.x] = 0;
-      canvas[player.y][player.x] = 1;
-      MAX7219_DrawMatrix(&display, canvas);
-    }
-    if (prev_left && !left_state) {
-      canvas[player.y][player.x--] = 0;
-      canvas[player.y][player.x] = 1;
-      MAX7219_DrawMatrix(&display, canvas);
-    }
-    if (prev_right && !right_state) {
-      canvas[player.y][player.x++] = 0;
-      canvas[player.y][player.x] = 1;
-      MAX7219_DrawMatrix(&display, canvas);
+
+    if (imu_status == MPU6050_OK)
+    {
+      float az = imu.accel.z - ACCEL_Z_OFFSET;
+      float ay = imu.accel.y;
+
+      int8_t dx = 0, dy = 0;
+
+      if (fabsf(az) > IMU_DEADZONE)
+        dy = -(int8_t)(IMU_SCALE * az);   /* наклон по Z → движение по Y */
+
+      if (fabsf(ay) > IMU_DEADZONE)
+        dx =  (int8_t)(IMU_SCALE * ay);   /* наклон по Y → движение по X */
+
+      if (dx != 0 || dy != 0) {
+        Player_Move(dx, dy);
+        MAX7219_DrawMatrix(&display, canvas);
+      }
+    } else {
+      IMU_Reinit();
     }
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-    prev_up = up_state;
-    prev_down = down_state;
-    prev_left = left_state;
-    prev_right = right_state;
-    HAL_Delay(20);
+    HAL_Delay(100);
   }
   /* USER CODE END 3 */
 }
@@ -218,6 +245,40 @@ void SystemClock_Config(void)
   {
     Error_Handler();
   }
+}
+
+/**
+  * @brief I2C1 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_I2C1_Init(void)
+{
+
+  /* USER CODE BEGIN I2C1_Init 0 */
+
+  /* USER CODE END I2C1_Init 0 */
+
+  /* USER CODE BEGIN I2C1_Init 1 */
+
+  /* USER CODE END I2C1_Init 1 */
+  hi2c1.Instance = I2C1;
+  hi2c1.Init.ClockSpeed = 400000;
+  hi2c1.Init.DutyCycle = I2C_DUTYCYCLE_2;
+  hi2c1.Init.OwnAddress1 = 0;
+  hi2c1.Init.AddressingMode = I2C_ADDRESSINGMODE_7BIT;
+  hi2c1.Init.DualAddressMode = I2C_DUALADDRESS_DISABLE;
+  hi2c1.Init.OwnAddress2 = 0;
+  hi2c1.Init.GeneralCallMode = I2C_GENERALCALL_DISABLE;
+  hi2c1.Init.NoStretchMode = I2C_NOSTRETCH_DISABLE;
+  if (HAL_I2C_Init(&hi2c1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN I2C1_Init 2 */
+
+  /* USER CODE END I2C1_Init 2 */
+
 }
 
 /**
@@ -271,11 +332,22 @@ static void MX_GPIO_Init(void)
   /* USER CODE END MX_GPIO_Init_1 */
 
   /* GPIO Ports Clock Enable */
+  __HAL_RCC_GPIOC_CLK_ENABLE();
   __HAL_RCC_GPIOA_CLK_ENABLE();
   __HAL_RCC_GPIOB_CLK_ENABLE();
 
   /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(GPIOC, GPIO_PIN_13, GPIO_PIN_RESET);
+
+  /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(MAX7219_CS_GPIO_Port, MAX7219_CS_Pin, GPIO_PIN_SET);
+
+  /*Configure GPIO pin : PC13 */
+  GPIO_InitStruct.Pin = GPIO_PIN_13;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
 
   /*Configure GPIO pin : MAX7219_CS_Pin */
   GPIO_InitStruct.Pin = MAX7219_CS_Pin;
@@ -310,6 +382,8 @@ void Error_Handler(void)
   __disable_irq();
   while (1)
   {
+    HAL_GPIO_TogglePin(GPIOC, GPIO_PIN_13);
+    HAL_Delay(100);
   }
   /* USER CODE END Error_Handler_Debug */
 }
