@@ -43,18 +43,18 @@ typedef struct {
 #define PLAYER_MIN_Y    1
 #define PLAYER_MAX_Y    (CANVAS_ROWS - 2)
 
-#define IMU_DEADZONE    0.05f   // меньше дедзона — чувствительнее
+#define IMU_DEADZONE    0.02f   // меньше дедзона — чувствительнее
 #define ACCEL_X_OFFSET  0.01f
 #define ACCEL_Y_OFFSET -0.03f
 #define ACCEL_Z_OFFSET  0.24f
 
-#define GRAVITY_SCALE   0.08f
-#define FRICTION        0.75f   // применяется только в покое — можно сделать жёстче
-#define MAX_VELOCITY    4.0f    // теперь шарик реально разгоняется до этого
-#define BOUNCE          0.75f
+#define GRAVITY_SCALE   0.03f
+#define FRICTION        0.85f   // применяется только в покое — можно сделать жёстче
+#define MAX_VELOCITY    8.0f    // теперь шарик реально разгоняется до этого
+#define BOUNCE          0.60f
 #define BOUNCE_MIN_V    0.5f
 
-#define TICK_MS         25      // период обновления физики, мс
+#define TICK_MS         15      // период обновления физики, мс
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -81,6 +81,9 @@ MAX7219_Handle_t display = {
 static uint8_t canvas[CANVAS_ROWS][CANVAS_COLS];
 static uint32_t last_tick = 0;
 static Player  player;
+
+static uint32_t rng_state = 12345;
+static uint8_t  food_x, food_y;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -108,6 +111,28 @@ static float clampf(float v, float lo, float hi) {
     if (v < lo) return lo;
     if (v > hi) return hi;
     return v;
+}
+
+static uint32_t rng_next(void)
+{
+    rng_state ^= HAL_GetTick();          // энтропия от таймера
+    rng_state ^= (rng_state << 13);
+    rng_state ^= (rng_state >> 17);
+    rng_state ^= (rng_state << 5);
+    return rng_state;
+}
+
+static void Food_Spawn(void)
+{
+    // Генерируем позицию внутри поля (не на стенках)
+    do {
+        food_x = (rng_next() % (CANVAS_COLS - 2)) + 1;
+        food_y = (rng_next() % (CANVAS_ROWS - 2)) + 1;
+    } while (food_x == (uint8_t)(player.x + 0.5f) &&
+             food_y == (uint8_t)(player.y + 0.5f));  // не спавним на игроке
+
+    canvas[food_y][food_x] = 1;
+    MAX7219_DrawMatrix(&display, canvas);
 }
 
 static void Physics_Update(float ax, float ay)
@@ -162,6 +187,13 @@ static void Physics_Update(float ax, float ay)
 
     player.x = nx;
     player.y = ny;
+
+    // Проверка съедения еды
+    uint8_t px_cur = (uint8_t)(player.x + 0.5f);
+    uint8_t py_cur = (uint8_t)(player.y + 0.5f);
+
+    if (px_cur == food_x && py_cur == food_y)
+        Food_Spawn();
 }
 
 /* USER CODE END 0 */
@@ -217,6 +249,7 @@ int main(void)
   player.vx = 0;
   player.vy = 0;
   canvas[(uint8_t)player.y][(uint8_t)player.x] = 1;
+  Food_Spawn();
   MAX7219_DrawMatrix(&display, canvas);
 
   imu_status = MPU6050_Init(&hi2c1);
