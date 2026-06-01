@@ -29,8 +29,8 @@
 /* Private typedef -----------------------------------------------------------*/
 /* USER CODE BEGIN PTD */
 typedef struct {
-    uint8_t x;
-    uint8_t y;
+    float x, y;   // непрерывная позиция
+    float vx, vy; // скорость
 } Player;
 /* USER CODE END PTD */
 
@@ -42,9 +42,18 @@ typedef struct {
 #define PLAYER_MAX_X    (CANVAS_COLS - 2)
 #define PLAYER_MIN_Y    1
 #define PLAYER_MAX_Y    (CANVAS_ROWS - 2)
-#define IMU_DEADZONE    0.08f
-#define IMU_SCALE       (1.0f / IMU_DEADZONE)
-#define ACCEL_Z_OFFSET  0.25f
+
+#define IMU_DEADZONE    0.05f   // меньше дедзона — чувствительнее
+#define ACCEL_X_OFFSET  0.01f
+#define ACCEL_Y_OFFSET -0.03f
+#define ACCEL_Z_OFFSET  0.24f
+
+#define GRAVITY_SCALE   0.16f
+#define FRICTION        0.90f   // чуть меньше трения для заметного отскока
+#define MAX_VELOCITY    2.0f    // было 0.8f — было слишком мало для отскока!
+#define BOUNCE          0.85f   // упругость стенок (0..1)
+
+#define TICK_MS         25      // период обновления физики, мс
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -69,6 +78,7 @@ MAX7219_Handle_t display = {
 };
 
 static uint8_t canvas[CANVAS_ROWS][CANVAS_COLS];
+static uint32_t last_tick = 0;
 static Player  player;
 /* USER CODE END PV */
 
@@ -88,28 +98,58 @@ static void MX_I2C1_Init(void);
 static void IMU_Reinit(void)
 {
     HAL_I2C_DeInit(&hi2c1);
+    HAL_Delay(10);          // дать шине осесть
     HAL_I2C_Init(&hi2c1);
     imu_status = MPU6050_Init(&hi2c1);
 }
 
-/* Переместить игрока, сохраняя его в пределах поля */
-static void Player_Move(int8_t dx, int8_t dy)
+static float clampf(float v, float lo, float hi) {
+    if (v < lo) return lo;
+    if (v > hi) return hi;
+    return v;
+}
+
+static void Physics_Update(float ax, float ay)
 {
-    int8_t nx = (int8_t)player.x + dx;
-    int8_t ny = (int8_t)player.y + dy;
+  // Применяем дедзону
+  float gx = (fabsf(ax) > IMU_DEADZONE) ? (ax - ACCEL_X_OFFSET) : 0.0f;
+  float gy = (fabsf(ay) > IMU_DEADZONE) ? (ay - ACCEL_Y_OFFSET) : 0.0f;
 
-    if (nx < PLAYER_MIN_X) nx = PLAYER_MIN_X;
-    if (nx > PLAYER_MAX_X) nx = PLAYER_MAX_X;
-    if (ny < PLAYER_MIN_Y) ny = PLAYER_MIN_Y;
-    if (ny > PLAYER_MAX_Y) ny = PLAYER_MAX_Y;
+  // Накапливаем скорость
+  player.vx += gx * GRAVITY_SCALE;
+  player.vy += gy * GRAVITY_SCALE;
 
-    if (nx == player.x && ny == player.y)
-        return;
+  // Ограничиваем максимальную скорость
+  player.vx = clampf(player.vx, -MAX_VELOCITY, MAX_VELOCITY);
+  player.vy = clampf(player.vy, -MAX_VELOCITY, MAX_VELOCITY);
 
-    canvas[player.y][player.x] = 0;
-    player.x = (uint8_t)nx;
-    player.y = (uint8_t)ny;
-    canvas[player.y][player.x] = 1;
+  // Новая позиция
+  float nx = player.x + player.vx;
+  float ny = player.y + player.vy;
+
+  // Коллизия ПЕРЕД трением — иначе отскок гасится в том же тике
+  if (nx < PLAYER_MIN_X) { nx = PLAYER_MIN_X; player.vx = fabsf(player.vx)  * BOUNCE; }
+  if (nx > PLAYER_MAX_X) { nx = PLAYER_MAX_X; player.vx = -fabsf(player.vx) * BOUNCE; }
+  if (ny < PLAYER_MIN_Y) { ny = PLAYER_MIN_Y; player.vy = fabsf(player.vy)  * BOUNCE; }
+  if (ny > PLAYER_MAX_Y) { ny = PLAYER_MAX_Y; player.vy = -fabsf(player.vy) * BOUNCE; }
+
+  // Трение ПОСЛЕ отскока
+  player.vx *= FRICTION;
+  player.vy *= FRICTION;
+
+  // Обновляем canvas только если пиксель реально сдвинулся
+  uint8_t px = (uint8_t)(nx + 0.5f);
+  uint8_t py = (uint8_t)(ny + 0.5f);
+
+  if (px != (uint8_t)(player.x + 0.5f) || py != (uint8_t)(player.y + 0.5f))
+  {
+      canvas[(uint8_t)(player.y + 0.5f)][(uint8_t)(player.x + 0.5f)] = 0;
+      canvas[py][px] = 1;
+      MAX7219_DrawMatrix(&display, canvas);
+  }
+
+  player.x = nx;
+  player.y = ny;
 }
 
 /* USER CODE END 0 */
@@ -160,10 +200,11 @@ int main(void)
   }
 
   /* Начальная позиция игрока */
-  player.x = CANVAS_COLS / 2;
-  player.y = CANVAS_ROWS / 2;
-  canvas[player.y][player.x] = 1;
-
+  player.x  = CANVAS_COLS / 2;
+  player.y  = CANVAS_ROWS / 2;
+  player.vx = 0;
+  player.vy = 0;
+  canvas[(uint8_t)player.y][(uint8_t)player.x] = 1;
   MAX7219_DrawMatrix(&display, canvas);
 
   imu_status = MPU6050_Init(&hi2c1);
@@ -173,35 +214,23 @@ int main(void)
   /* USER CODE BEGIN WHILE */
   while (1)
   {
-    if (imu_status == MPU6050_OK)
-    {
+    // Неблокирующий таймер вместо HAL_Delay
+    if (HAL_GetTick() - last_tick < TICK_MS)
+      continue;
+    last_tick = HAL_GetTick();
+
+    if (imu_status == MPU6050_OK) {
+      if (HAL_I2C_GetState(&hi2c1) == HAL_I2C_STATE_READY)
       imu_status = MPU6050_ReadAll(&hi2c1, &imu);
     }
 
     if (imu_status == MPU6050_OK)
-    {
-      float az = imu.accel.z - ACCEL_Z_OFFSET;
-      float ay = imu.accel.y;
-
-      int8_t dx = 0, dy = 0;
-
-      if (fabsf(az) > IMU_DEADZONE)
-        dy = -(int8_t)(IMU_SCALE * az);   /* наклон по Z → движение по Y */
-
-      if (fabsf(ay) > IMU_DEADZONE)
-        dx =  (int8_t)(IMU_SCALE * ay);   /* наклон по Y → движение по X */
-
-      if (dx != 0 || dy != 0) {
-        Player_Move(dx, dy);
-        MAX7219_DrawMatrix(&display, canvas);
-      }
-    } else {
+      Physics_Update(-imu.accel.x, -imu.accel.y);
+    else
       IMU_Reinit();
-    }
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-    HAL_Delay(100);
   }
   /* USER CODE END 3 */
 }
@@ -382,8 +411,7 @@ void Error_Handler(void)
   __disable_irq();
   while (1)
   {
-    HAL_GPIO_TogglePin(GPIOC, GPIO_PIN_13);
-    HAL_Delay(100);
+
   }
   /* USER CODE END Error_Handler_Debug */
 }
