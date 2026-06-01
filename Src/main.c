@@ -48,10 +48,11 @@ typedef struct {
 #define ACCEL_Y_OFFSET -0.03f
 #define ACCEL_Z_OFFSET  0.24f
 
-#define GRAVITY_SCALE   0.16f
-#define FRICTION        0.90f   // чуть меньше трения для заметного отскока
-#define MAX_VELOCITY    2.0f    // было 0.8f — было слишком мало для отскока!
-#define BOUNCE          0.85f   // упругость стенок (0..1)
+#define GRAVITY_SCALE   0.08f
+#define FRICTION        0.75f   // применяется только в покое — можно сделать жёстче
+#define MAX_VELOCITY    4.0f    // теперь шарик реально разгоняется до этого
+#define BOUNCE          0.75f
+#define BOUNCE_MIN_V    0.5f
 
 #define TICK_MS         25      // период обновления физики, мс
 /* USER CODE END PD */
@@ -111,45 +112,56 @@ static float clampf(float v, float lo, float hi) {
 
 static void Physics_Update(float ax, float ay)
 {
-  // Применяем дедзону
-  float gx = (fabsf(ax) > IMU_DEADZONE) ? (ax - ACCEL_X_OFFSET) : 0.0f;
-  float gy = (fabsf(ay) > IMU_DEADZONE) ? (ay - ACCEL_Y_OFFSET) : 0.0f;
+    float gx = (fabsf(ax) > IMU_DEADZONE) ? (ax - ACCEL_X_OFFSET) : 0.0f;
+    float gy = (fabsf(ay) > IMU_DEADZONE) ? (ay - ACCEL_Y_OFFSET) : 0.0f;
 
-  // Накапливаем скорость
-  player.vx += gx * GRAVITY_SCALE;
-  player.vy += gy * GRAVITY_SCALE;
+    // Накапливаем скорость
+    player.vx += gx * GRAVITY_SCALE;
+    player.vy += gy * GRAVITY_SCALE;
 
-  // Ограничиваем максимальную скорость
-  player.vx = clampf(player.vx, -MAX_VELOCITY, MAX_VELOCITY);
-  player.vy = clampf(player.vy, -MAX_VELOCITY, MAX_VELOCITY);
+    // Трение только когда нет ускорения (иначе шарик разгоняется свободно)
+    if (fabsf(gx) < IMU_DEADZONE) player.vx *= FRICTION;
+    if (fabsf(gy) < IMU_DEADZONE) player.vy *= FRICTION;
 
-  // Новая позиция
-  float nx = player.x + player.vx;
-  float ny = player.y + player.vy;
+    // Ограничиваем максимальную скорость
+    player.vx = clampf(player.vx, -MAX_VELOCITY, MAX_VELOCITY);
+    player.vy = clampf(player.vy, -MAX_VELOCITY, MAX_VELOCITY);
 
-  // Коллизия ПЕРЕД трением — иначе отскок гасится в том же тике
-  if (nx < PLAYER_MIN_X) { nx = PLAYER_MIN_X; player.vx = fabsf(player.vx)  * BOUNCE; }
-  if (nx > PLAYER_MAX_X) { nx = PLAYER_MAX_X; player.vx = -fabsf(player.vx) * BOUNCE; }
-  if (ny < PLAYER_MIN_Y) { ny = PLAYER_MIN_Y; player.vy = fabsf(player.vy)  * BOUNCE; }
-  if (ny > PLAYER_MAX_Y) { ny = PLAYER_MAX_Y; player.vy = -fabsf(player.vy) * BOUNCE; }
+    // Новая позиция
+    float nx = player.x + player.vx;
+    float ny = player.y + player.vy;
 
-  // Трение ПОСЛЕ отскока
-  player.vx *= FRICTION;
-  player.vy *= FRICTION;
+    // Отскок от стенок
+    if (nx < PLAYER_MIN_X) {
+        nx = PLAYER_MIN_X;
+        player.vx = fabsf(player.vx) * BOUNCE;
+    }
+    if (nx > PLAYER_MAX_X) {
+        nx = PLAYER_MAX_X;
+        player.vx = -(fabsf(player.vx) * BOUNCE);
+    }
+    if (ny < PLAYER_MIN_Y) {
+        ny = PLAYER_MIN_Y;
+        player.vy = fabsf(player.vy) * BOUNCE;
+    }
+    if (ny > PLAYER_MAX_Y) {
+        ny = PLAYER_MAX_Y;
+        player.vy = -(fabsf(player.vy) * BOUNCE);
+    }
 
-  // Обновляем canvas только если пиксель реально сдвинулся
-  uint8_t px = (uint8_t)(nx + 0.5f);
-  uint8_t py = (uint8_t)(ny + 0.5f);
+    // Обновляем canvas только если пиксель реально сдвинулся
+    uint8_t px = (uint8_t)(nx + 0.5f);
+    uint8_t py = (uint8_t)(ny + 0.5f);
 
-  if (px != (uint8_t)(player.x + 0.5f) || py != (uint8_t)(player.y + 0.5f))
-  {
-      canvas[(uint8_t)(player.y + 0.5f)][(uint8_t)(player.x + 0.5f)] = 0;
-      canvas[py][px] = 1;
-      MAX7219_DrawMatrix(&display, canvas);
-  }
+    if (px != (uint8_t)(player.x + 0.5f) || py != (uint8_t)(player.y + 0.5f))
+    {
+        canvas[(uint8_t)(player.y + 0.5f)][(uint8_t)(player.x + 0.5f)] = 0;
+        canvas[py][px] = 1;
+        MAX7219_DrawMatrix(&display, canvas);
+    }
 
-  player.x = nx;
-  player.y = ny;
+    player.x = nx;
+    player.y = ny;
 }
 
 /* USER CODE END 0 */
