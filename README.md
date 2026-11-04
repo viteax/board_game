@@ -2,7 +2,7 @@
 
 A tilt-controlled ball game on an STM32. Tilt the board – the ball rolls across a 32×8 LED matrix, bounces off the walls and eats the food that appears in random spots.
 
-<!-- TODO: add a GIF of the game running on the board -->
+<p align="center"><img src="docs/demo.gif" alt="Animation: tilting the matrix rolls the ball, it bounces off the walls and eats food" width="470"/></p>
 
 ## How it works
 
